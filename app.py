@@ -1,20 +1,26 @@
 import streamlit as st
 import pandas as pd
-import requests
 from datetime import datetime
 import unicodedata
 import re
 from uuid import uuid4
+import boto3
 
-# --- Config Supabase ---
-SUPABASE_URL = st.secrets["supabase"]["url"]
-SUPABASE_KEY = st.secrets["supabase"]["key"]
-TABLE_MODELS = "pending_measurements"
-TABLE_MEASURES = "breast_measurements"
-STORAGE_BUCKET = "models"
+import boto3
+from datetime import datetime
+
+
+REGION = "eu-north-1"
+dynamodb = boto3.resource("dynamodb", region_name=REGION)
+
+TABLE_MEASUREMENTS = "BreastMeasurements"
+TABLE_PENDING = "PendingMeasurements"
+
+REGION = "eu-north-1"
+S3_BUCKET = "boo-models-test"
 
 st.set_page_config(page_title="Accueil - Upload 3D", layout="wide")
-st.title("📤 Uploader un modèle 3D & Visualiser des mesures")
+st.title("📄 Uploader un modèle 3D & Visualiser des mesures")
 
 # --- Fonctions utiles ---
 def sanitize_filename(name):
@@ -22,38 +28,39 @@ def sanitize_filename(name):
     return re.sub(r"[^\w\-_.]", "_", name)
 
 def upload_to_storage(file_bytes, filename):
-    url = f"{SUPABASE_URL}/storage/v1/object/{STORAGE_BUCKET}/{filename}"
-    headers = {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/octet-stream"
-    }
-    response = requests.put(url, headers=headers, data=file_bytes)
-    return response.status_code == 200
-
+    try:
+        s3 = boto3.client("s3", region_name=REGION)
+        s3.put_object(Bucket=S3_BUCKET, Key=filename, Body=file_bytes)
+        return True
+    except Exception as e:
+        st.error(f"Erreur S3 : {e}")
+        return False
 def record_pending_job(email, filename):
-    url = f"{SUPABASE_URL}/rest/v1/{TABLE_MODELS}"
-    headers = {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
+    item = {
         "email": email,
+        "timestamp": datetime.utcnow().isoformat(),
         "filename": filename,
-        "status": "pending",
-        "timestamp": datetime.utcnow().isoformat()
+        "status": "pending"
     }
-    return requests.post(url, headers=headers, json=payload).ok
+    try:
+        table = dynamodb.Table(TABLE_PENDING)
+        table.put_item(Item=item)
+        return True
+    except Exception as e:
+        print(f"Erreur DynamoDB : {e}")
+        return False
 
-@st.cache_data(ttl=60)
+
 def get_existing_emails():
-    url = f"{SUPABASE_URL}/rest/v1/{TABLE_MEASURES}?select=email"
-    headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
-    r = requests.get(url, headers=headers)
-    if r.status_code != 200:
+    try:
+        table = dynamodb.Table(TABLE_MEASUREMENTS)
+        response = table.scan(ProjectionExpression="email")
+        emails = {item["email"] for item in response.get("Items", [])}
+        return sorted(emails)
+    except Exception as e:
+        print(f"Erreur DynamoDB : {e}")
         return []
-    return sorted(list(set(d["email"] for d in r.json() if d["email"])))
+
 
 # --- Upload section ---
 st.subheader("1️⃣ Uploader un fichier .obj")
@@ -62,7 +69,7 @@ uploaded_file = st.file_uploader("Fichier .obj", type=["obj"])
 
 if uploaded_file and email:
     filename = f"{uuid4().hex}_{sanitize_filename(uploaded_file.name)}"
-    if st.button("Envoyer dans Supabase"):
+    if st.button("Envoyer dans DynamoDB"):
         with st.spinner("Envoi en cours..."):
             success = upload_to_storage(uploaded_file.getvalue(), filename)
             if success and record_pending_job(email, filename):

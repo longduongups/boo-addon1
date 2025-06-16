@@ -1,8 +1,6 @@
 import streamlit as st
 import pandas as pd
-import requests
-import os
-
+import boto3
 # --- Page configuration ---
 st.set_page_config(page_title="🎀 Boo - Measurements Viewer", layout="wide")
 
@@ -57,7 +55,21 @@ st.markdown("""
         }
     </style>
 """, unsafe_allow_html=True)
+REGION = "eu-north-1"
+dynamodb = boto3.resource("dynamodb", region_name=REGION)
 
+TABLE_MEASUREMENTS = "BreastMeasurements"
+TABLE_PENDING = "PendingMeasurements"
+def get_data(email):
+    try:
+        table = dynamodb.Table(TABLE_MEASUREMENTS)
+        response = table.query(
+            KeyConditionExpression=boto3.dynamodb.conditions.Key("email").eq(email)
+        )
+        return response.get("Items", [])
+    except Exception as e:
+        print(f"Erreur DynamoDB : {e}")
+        return []
 # --- Title ---
 st.markdown("""
     <div style="text-align: center; line-height: 1.2;">
@@ -72,23 +84,7 @@ if "email" not in st.session_state:
     st.stop()
 
 email = st.session_state["email"]
-
-# --- Supabase configuration ---
-SUPABASE_URL = st.secrets["supabase"]["url"]
-SUPABASE_KEY = st.secrets["supabase"]["key"]
-TABLE = "breast_measurements"
-
-@st.cache_data(ttl=10)
-def get_data(email):
-    headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
-    url = f"{SUPABASE_URL}/rest/v1/{TABLE}?email=eq.{email}&select=*"
-    r = requests.get(url, headers=headers)
-    if r.status_code != 200:
-        st.error("Supabase error: " + r.text)
-        return pd.DataFrame()
-    return pd.DataFrame(r.json())
-
-df = get_data(email)
+df = pd.DataFrame(st.session_state.get("data") or get_data(email))
 
 if df.empty:
     st.warning("No measurement data found for this email.")
@@ -99,7 +95,7 @@ st.markdown('<div style="font-weight: bold; font-size: 16px; color: black; margi
 selected = st.selectbox("", df["timestamp"])
 row = df[df["timestamp"] == selected].iloc[0]
 
-# --- LEFT / RIGHT blocks (equal size) ---
+# --- LEFT / RIGHT blocks ---
 st.markdown(f"""
 <div class="flex-container">
     <div class="centered-box equal-box">
@@ -153,4 +149,4 @@ st.markdown(f"""
 
 # --- Back button ---
 if st.button("⬅️ Back to home"):
-    st.switch_page("app_supabase.py")
+    st.switch_page("app.py")
